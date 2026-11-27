@@ -265,6 +265,24 @@ struct RaceStrategy: Equatable {
     }
 }
 
+// MARK: - Camera Mode
+
+enum RaceCameraMode: String, CaseIterable, Identifiable, Equatable {
+    case chase     = "Chase"
+    case trackside = "Trackside"
+    case top       = "Top View"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .chase:     return "car.rear.fill"
+        case .trackside: return "video.fill"
+        case .top:       return "map.fill"
+        }
+    }
+}
+
 // MARK: - Live Race State
 
 struct RaceState: Equatable {
@@ -285,6 +303,13 @@ struct RaceState: Equatable {
     var nextPitLap: Int?
     var isPittingUser: Bool
     var isPittingBot: Bool
+    var isUserInPitBox: Bool
+    var isBotInPitBox: Bool
+    var userPitBlend: Double
+    var botPitBlend: Double
+    var userPitTimerRemaining: Double
+    var userSpeedKmh: Int
+    var botSpeedKmh: Int
     var pitPromptLap: Int?
     var userTrackProgress: Double
     var botTrackProgress: Double
@@ -313,6 +338,13 @@ struct RaceState: Equatable {
             nextPitLap: strategy.pitLaps.first,
             isPittingUser: false,
             isPittingBot: false,
+            isUserInPitBox: false,
+            isBotInPitBox: false,
+            userPitBlend: 0,
+            botPitBlend: 0,
+            userPitTimerRemaining: 0,
+            userSpeedKmh: 0,
+            botSpeedKmh: 0,
             pitPromptLap: nil,
             userTrackProgress: 0.0,
             botTrackProgress: 0.0,

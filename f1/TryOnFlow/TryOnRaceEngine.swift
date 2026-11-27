@@ -100,10 +100,10 @@ enum TryOnRaceEngine {
     }
 
     /// Evaluates live race state at a simulated elapsed race clock `raceClockSeconds`.
-    /// Note: `userPitBonusSeconds` grants a minor execution reward (up to 0.6s) if the user taps BOX NOW on cue.
     static func state(
         at raceClockSeconds: Double,
         timeline: SimulatedTimeline,
+        spline: TrackSpline,
         userPitBonusSeconds: Double,
         acknowledgedPitLaps: Set<Int>,
         isPaused: Bool,
@@ -120,13 +120,16 @@ enum TryOnRaceEngine {
         let clampedClock = min(max(0, raceClockSeconds), finishClock)
         let finished = raceClockSeconds >= finishClock
 
-        let uPos = progress(at: clampedClock, cumulative: userCum, pitLaps: timeline.userStrategy.pitLaps, circuit: timeline.circuit)
-        let bPos = progress(at: clampedClock, cumulative: botCum, pitLaps: timeline.botStrategy.pitLaps, circuit: timeline.circuit)
+        let uPos = progress(at: clampedClock, cumulative: userCum, pitLaps: timeline.userStrategy.pitLaps, circuit: timeline.circuit, spline: spline)
+        let bPos = progress(at: clampedClock, cumulative: botCum, pitLaps: timeline.botStrategy.pitLaps, circuit: timeline.circuit, spline: spline)
 
         let leaderLap = finished ? totalLaps : min(totalLaps, max(uPos.lap, bPos.lap))
         let userLap = finished ? totalLaps : uPos.lap
-        let userInfo = timeline.userStrategy.compound(forLap: userLap, totalLaps: totalLaps)
-        let botInfo = timeline.botStrategy.compound(forLap: finished ? totalLaps : bPos.lap, totalLaps: totalLaps)
+        // When stopped/exiting pit box, reflect the newly fitted compound
+        let displayCompoundLap = uPos.isInPitBox || uPos.hasChangedTyres ? min(totalLaps, userLap + 1) : userLap
+        let userInfo = timeline.userStrategy.compound(forLap: displayCompoundLap, totalLaps: totalLaps)
+        let botDisplayLap = bPos.hasChangedTyres ? min(totalLaps, bPos.lap + 1) : bPos.lap
+        let botInfo = timeline.botStrategy.compound(forLap: finished ? totalLaps : botDisplayLap, totalLaps: totalLaps)
 
         let maxOptimalLaps = max(3.0, userInfo.compound.optimalStintFraction * Double(totalLaps) * 1.15)
         let tyreHealth = max(0.08, min(1.0, 1.0 - (Double(userInfo.tyreAge - 1) / maxOptimalLaps) * 0.72))
@@ -153,7 +156,6 @@ enum TryOnRaceEngine {
             return abs(userRaceDistance - botRaceDistance) * timeline.circuit.baseLapTime
         }()
 
-        // Current effective elapsed gap estimate
         let userDisplayTime = min(clampedClock, maxUserTime)
         let botDisplayTime = min(clampedClock, maxBotTime)
 
@@ -168,9 +170,13 @@ enum TryOnRaceEngine {
             if finished {
                 return maxUserTime <= maxBotTime ? "CHEQUERED FLAG! P1 FINISH!" : "CHEQUERED FLAG! P2 FINISH"
             }
+            if uPos.isInPitBox {
+                let nextCompound = timeline.userStrategy.compound(forLap: min(totalLaps, userLap + 1), totalLaps: totalLaps).compound
+                return String(format: "PIT BOX · Fitting %@s (%.1fs)", nextCompound.name, uPos.pitTimerRemaining)
+            }
             if uPos.isInPit {
                 let nextCompound = timeline.userStrategy.compound(forLap: min(totalLaps, userLap + 1), totalLaps: totalLaps).compound
-                return "IN PIT LANE · Fitting \(nextCompound.name) tyres"
+                return "PIT LANE · Switching to \(nextCompound.name) tyres"
             }
             if bPos.isInPit {
                 return "BOT IN PITS · Gain track position!"
@@ -203,6 +209,13 @@ enum TryOnRaceEngine {
             nextPitLap: finished ? nil : nextPit,
             isPittingUser: uPos.isInPit,
             isPittingBot: bPos.isInPit,
+            isUserInPitBox: uPos.isInPitBox,
+            isBotInPitBox: bPos.isInPitBox,
+            userPitBlend: uPos.pitBlend,
+            botPitBlend: bPos.pitBlend,
+            userPitTimerRemaining: uPos.pitTimerRemaining,
+            userSpeedKmh: finished ? 0 : uPos.speedKmh,
+            botSpeedKmh: finished ? 0 : bPos.speedKmh,
             pitPromptLap: promptLap,
             userTrackProgress: finished ? 0.0 : uPos.lapFraction,
             botTrackProgress: finished ? 0.0 : bPos.lapFraction,
@@ -255,18 +268,26 @@ enum TryOnRaceEngine {
         let lap: Int
         let lapFraction: Double
         let isInPit: Bool
+        let isInPitBox: Bool
+        let hasChangedTyres: Bool
+        let pitBlend: Double
+        let pitTimerRemaining: Double
+        let speedKmh: Int
     }
 
     private static func progress(
         at clock: Double,
         cumulative: [Double],
         pitLaps: [Int],
-        circuit: Circuit
+        circuit: Circuit,
+        spline: TrackSpline
     ) -> CarProgress {
         let totalLaps = cumulative.count - 1
-        guard totalLaps > 0 else { return CarProgress(lap: 1, lapFraction: 0, isInPit: false) }
+        guard totalLaps > 0 else {
+            return CarProgress(lap: 1, lapFraction: 0, isInPit: false, isInPitBox: false, hasChangedTyres: false, pitBlend: 0, pitTimerRemaining: 0, speedKmh: 0)
+        }
         if clock >= cumulative[totalLaps] {
-            return CarProgress(lap: totalLaps, lapFraction: 1.0, isInPit: false)
+            return CarProgress(lap: totalLaps, lapFraction: 0.0, isInPit: false, isInPitBox: false, hasChangedTyres: false, pitBlend: 0, pitTimerRemaining: 0, speedKmh: 0)
         }
 
         var lapIdx = 0
@@ -278,19 +299,49 @@ enum TryOnRaceEngine {
         let tEnd = cumulative[lapIdx + 1]
         let lapDuration = max(0.1, tEnd - tStart)
         let elapsedInLap = max(0, clock - tStart)
+        let exitingPitFromPrevLap = lapNum > 1 && pitLaps.contains(lapNum - 1)
 
         if pitLaps.contains(lapNum) {
+            // Pit entry begins at s = 0.88; car reaches pit box s = 0.97 during pit phase
             let drivingDuration = max(1.0, lapDuration - circuit.pitLossSeconds)
             if elapsedInLap < drivingDuration {
-                let frac = min(0.97, elapsedInLap / drivingDuration * 0.97)
-                return CarProgress(lap: lapNum, lapFraction: frac, isInPit: false)
+                let linFrac = elapsedInLap / drivingDuration * 0.93
+                let visualS = Double(spline.visualArcProgress(fromLinearFraction: linFrac))
+                let pitBlend = flowClamp((visualS - 0.86) / 0.06)
+                let spdFactor = Double(spline.sample(at: Float(visualS)).speedFactor)
+                let speed = pitBlend > 0.1 ? Int(220 - pitBlend * 140) : Int((98 + spdFactor * 224).rounded())
+                return CarProgress(lap: lapNum, lapFraction: visualS, isInPit: pitBlend > 0.25, isInPitBox: false, hasChangedTyres: false, pitBlend: pitBlend, pitTimerRemaining: 0, speedKmh: speed)
             } else {
-                let pitFrac = (elapsedInLap - drivingDuration) / max(1.0, circuit.pitLossSeconds)
-                return CarProgress(lap: lapNum, lapFraction: 0.97 + min(0.03, pitFrac * 0.03), isInPit: true)
+                let pitElapsed = elapsedInLap - drivingDuration
+                let pitTotal = max(1.0, circuit.pitLossSeconds)
+                let pitFrac = flowClamp(pitElapsed / pitTotal)
+
+                if pitFrac < 0.20 {
+                    // Rolling into pit box 0.93 -> 0.97
+                    let sub = pitFrac / 0.20
+                    let s = 0.93 + 0.04 * sub
+                    return CarProgress(lap: lapNum, lapFraction: s, isInPit: true, isInPitBox: false, hasChangedTyres: false, pitBlend: 1.0, pitTimerRemaining: 2.6, speedKmh: 80)
+                } else if pitFrac < 0.78 {
+                    // Stationary at pit box (s = 0.97), service timer counts down 2.6s -> 0.0s
+                    let boxFrac = (pitFrac - 0.20) / 0.58
+                    let remaining = max(0.0, (1.0 - boxFrac) * 2.6)
+                    return CarProgress(lap: lapNum, lapFraction: 0.97, isInPit: true, isInPitBox: true, hasChangedTyres: boxFrac > 0.55, pitBlend: 1.0, pitTimerRemaining: remaining, speedKmh: 0)
+                } else {
+                    // Accelerating out of box 0.97 -> 1.00
+                    let sub = (pitFrac - 0.78) / 0.22
+                    let s = 0.97 + 0.029 * sub
+                    return CarProgress(lap: lapNum, lapFraction: s, isInPit: true, isInPitBox: false, hasChangedTyres: true, pitBlend: 1.0, pitTimerRemaining: 0, speedKmh: Int(80 + sub * 70))
+                }
             }
         } else {
-            let frac = min(0.999, elapsedInLap / lapDuration)
-            return CarProgress(lap: lapNum, lapFraction: frac, isInPit: false)
+            let linFrac = flowClamp(elapsedInLap / lapDuration)
+            let visualS = Double(spline.visualArcProgress(fromLinearFraction: linFrac))
+            // Smoothly merge out of pit lane over first 10% of the out-lap
+            let pitBlend = exitingPitFromPrevLap ? max(0.0, 1.0 - visualS / 0.10) : 0.0
+            let spdFactor = Double(spline.sample(at: Float(visualS)).speedFactor)
+            let rawKmh = 98.0 + spdFactor * 224.0
+            let kmh = pitBlend > 0.15 ? Int((160.0 * pitBlend + rawKmh * (1.0 - pitBlend)).rounded()) : Int(rawKmh.rounded())
+            return CarProgress(lap: lapNum, lapFraction: visualS, isInPit: pitBlend > 0.25, isInPitBox: false, hasChangedTyres: false, pitBlend: pitBlend, pitTimerRemaining: 0, speedKmh: kmh)
         }
     }
 

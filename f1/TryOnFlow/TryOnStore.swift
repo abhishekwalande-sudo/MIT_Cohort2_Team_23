@@ -13,9 +13,11 @@ final class TryOnStore {
     var step: TryOnStep = .home
     let circuits: [Circuit] = Circuit.all
     var selectedCircuit: Circuit
+    var trackSpline: TrackSpline
     var strategy: RaceStrategy
     var raceState: RaceState
     var raceResult: RaceResult?
+    var cameraMode: RaceCameraMode = .chase
 
     // Reaction Rush persistence
     var reactionBestMs: Int?
@@ -33,6 +35,7 @@ final class TryOnStore {
         let initialCircuit = Circuit.all[0]
         let initialStrategy = RaceStrategy.defaultStrategy(pitStops: 2, totalLaps: initialCircuit.totalLaps)
         self.selectedCircuit = initialCircuit
+        self.trackSpline = TrackSpline.build(for: initialCircuit)
         self.strategy = initialStrategy
         self.raceState = RaceState.initial(circuit: initialCircuit, strategy: initialStrategy)
 
@@ -62,6 +65,7 @@ final class TryOnStore {
 
     func selectCircuit(_ circuit: Circuit) {
         selectedCircuit = circuit
+        trackSpline = TrackSpline.build(for: circuit)
         strategy = RaceStrategy.defaultStrategy(pitStops: strategy.pitStopCount, totalLaps: circuit.totalLaps)
         raceResult = nil
         step = .strategySetup
@@ -113,6 +117,7 @@ final class TryOnStore {
         raceClockSeconds = 0
         userPitBonusSeconds = 0
         acknowledgedPitLaps = []
+        cameraMode = .chase
 
         let botStrategy = selectedCircuit.defaultBotStrategy
         let simTimeline = TryOnRaceEngine.simulate(
@@ -138,6 +143,10 @@ final class TryOnStore {
         default:  next = 1.0
         }
         raceState.speedMultiplier = next
+    }
+
+    func setCameraMode(_ mode: RaceCameraMode) {
+        cameraMode = mode
     }
 
     func triggerPitNow() {
@@ -187,21 +196,20 @@ final class TryOnStore {
     private func startSimulationLoop() {
         stopSimulationLoop()
         simTask = Task { @MainActor [weak self] in
-            // ~30 FPS update; 1x speed runs roughly 1 race lap per 1.4 real seconds
-            let tickNanoseconds: UInt64 = 33_000_000
+            // ~60 FPS tick; 1x speed runs ~12 real seconds per lap for realistic 3D driving pace
+            let tickNanoseconds: UInt64 = 16_666_667
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: tickNanoseconds)
                 guard !Task.isCancelled, let self, self.timeline != nil else { return }
 
                 if !self.raceState.isPaused {
-                    // Scale real dt (0.033s) into race-seconds so a 20-lap race (~1700s) plays in ~28s at 1x
-                    let simRate = self.selectedCircuit.baseLapTime / 1.4
-                    self.raceClockSeconds += 0.033 * simRate * self.raceState.speedMultiplier
+                    let simRate = self.selectedCircuit.baseLapTime / 12.0
+                    self.raceClockSeconds += (1.0 / 60.0) * simRate * self.raceState.speedMultiplier
                     self.refreshRaceState()
 
                     if self.raceState.isFinished {
                         self.stopSimulationLoop()
-                        try? await Task.sleep(nanoseconds: 750_000_000)
+                        try? await Task.sleep(nanoseconds: 900_000_000)
                         if !Task.isCancelled {
                             self.completeRace()
                         }
@@ -222,6 +230,7 @@ final class TryOnStore {
         raceState = TryOnRaceEngine.state(
             at: raceClockSeconds,
             timeline: timeline,
+            spline: trackSpline,
             userPitBonusSeconds: userPitBonusSeconds,
             acknowledgedPitLaps: acknowledgedPitLaps,
             isPaused: raceState.isPaused,

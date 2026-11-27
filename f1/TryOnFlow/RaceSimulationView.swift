@@ -2,22 +2,25 @@
 //  RaceSimulationView.swift
 //  f1
 //
-//  Screen 4 of TRY-ON Flow: Live Race Simulation with animated circuit map,
-//  tyre degradation, pit stops, and running order.
+//  Screen 4 of TRY-ON Flow: Realistic 3D RealityKit F1 Race Simulation
+//  connected to live tyre degradation, pit stops, camera switcher, and running order.
 //
 
+import RealityKit
 import SwiftUI
 
 struct RaceSimulationView: View {
     @Bindable var store: TryOnStore
+    @State private var sceneController = RaceSceneController()
 
     private var circuit: Circuit { store.selectedCircuit }
     private var state: RaceState { store.raceState }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 topBar
+
                 ScreenTitle(
                     eyebrow: "LIVE TELEMETRY · \(circuit.name.uppercased())",
                     title: "RACE SIMULATION",
@@ -25,7 +28,7 @@ struct RaceSimulationView: View {
                 )
 
                 hudRow
-                circuitMapCard
+                realityViewportCard
 
                 if let banner = state.statusBanner {
                     statusBannerRow(banner)
@@ -67,7 +70,7 @@ struct RaceSimulationView: View {
     // MARK: - HUD Row
 
     private var hudRow: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             hudTile(
                 label: "LAP",
                 value: "\(state.currentLap)/\(state.totalLaps)",
@@ -79,109 +82,166 @@ struct RaceSimulationView: View {
                 accent: .white
             )
             hudTile(
-                label: "POSITION",
+                label: "SPEED",
+                value: "\(state.userSpeedKmh)",
+                unit: "km/h",
+                accent: .white
+            )
+            hudTile(
+                label: "POS",
                 value: "P\(state.userPosition)",
                 accent: state.userPosition == 1 ? F1.green : F1.yellow
             )
         }
     }
 
-    private func hudTile(label: String, value: String, accent: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func hudTile(label: String, value: String, unit: String? = nil, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.system(size: 9, weight: .black))
-                .tracking(1.2)
+                .font(.system(size: 8, weight: .black))
+                .tracking(1.1)
                 .foregroundStyle(F1.muted)
-            Text(value)
-                .font(.system(size: 18, weight: .black, design: .monospaced))
-                .foregroundStyle(accent)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value)
+                    .font(.system(size: 16, weight: .black, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(F1.muted)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .flowCard(radius: 16)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .flowCard(radius: 14)
     }
 
-    // MARK: - Circuit Map
+    // MARK: - 3D RealityKit Viewport
 
-    private var circuitMapCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                SectionTitle("CIRCUIT TRACKER")
-                Spacer()
-                HStack(spacing: 12) {
-                    LegendDot(color: Driver.user.color, name: Driver.user.shortCode)
-                    LegendDot(color: Driver.bot.color, name: Driver.bot.shortCode)
+    private var realityViewportCard: some View {
+        VStack(spacing: 10) {
+            ZStack(alignment: .topLeading) {
+                RealityView { content in
+                    sceneController.setupScene(
+                        in: content,
+                        circuit: circuit,
+                        spline: store.trackSpline,
+                        initialState: state
+                    )
+                } update: { _ in
+                    sceneController.update(state: store.raceState, cameraMode: store.cameraMode)
+                }
+                .frame(height: 330)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+
+                // Top-left live broadcast pill + legend
+                HStack {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(F1.red)
+                            .frame(width: 6, height: 6)
+                            .pulse()
+                        Text("3D LIVE")
+                            .font(.system(size: 9, weight: .black))
+                            .tracking(1.2)
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+
+                    Spacer()
+
+                    HStack(spacing: 10) {
+                        LegendDot(color: Driver.user.color, name: Driver.user.shortCode)
+                        LegendDot(color: Driver.bot.color, name: Driver.bot.shortCode)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.62), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+                }
+                .padding(12)
+
+                // Pit box live timer overlay
+                if state.isUserInPitBox {
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 10) {
+                            Image(systemName: "wrench.and.screwdriver.fill")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(F1.yellow)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("PIT CREW SERVICING")
+                                    .font(.system(size: 9, weight: .black))
+                                    .tracking(1)
+                                    .foregroundStyle(F1.yellow)
+                                Text("Fitting \(state.userCompound.name) Tyres")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundStyle(.white)
+                            }
+                            Spacer()
+                            Text(String(format: "%.1fs", state.userPitTimerRemaining))
+                                .font(.system(size: 18, weight: .black, design: .monospaced))
+                                .foregroundStyle(F1.yellow)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(F1.yellow.opacity(0.65), lineWidth: 1.2))
+                        .padding(12)
+                    }
                 }
             }
-
-            GeometryReader { geo in
-                let inset: CGFloat = 24
-                let rect = CGRect(
-                    x: inset,
-                    y: inset,
-                    width: max(40, geo.size.width - inset * 2),
-                    height: max(40, geo.size.height - inset * 2)
-                )
-                let path = CircuitShape(pts: circuit.pts).path(in: rect)
-                let startPt = path.flowPoint(at: 0.002)
-                let userPt = path.flowPoint(at: CGFloat(state.userTrackProgress))
-                let botPt = path.flowPoint(at: CGFloat(state.botTrackProgress))
-
-                ZStack {
-                    path
-                        .stroke(.white.opacity(0.10), style: StrokeStyle(lineWidth: 14, lineCap: .round, lineJoin: .round))
-                    path
-                        .stroke(.white.opacity(0.35), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-
-                    // Start/Finish marker
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 7, height: 7)
-                        .position(startPt)
-
-                    // BOT marker
-                    carMarker(label: Driver.bot.shortCode, color: Driver.bot.color, isPitting: state.isPittingBot)
-                        .position(botPt)
-
-                    // YOU marker
-                    carMarker(label: Driver.user.shortCode, color: Driver.user.color, isPitting: state.isPittingUser)
-                        .position(userPt)
-                }
-            }
-            .frame(height: 190)
-            .background(
-                RadialGradient(
-                    colors: [circuit.tint.opacity(0.22), F1.background.opacity(0.8)],
-                    center: .center,
-                    startRadius: 10,
-                    endRadius: 180
-                ),
-                in: RoundedRectangle(cornerRadius: 16)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(.white.opacity(0.12), lineWidth: 1)
             )
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.08), lineWidth: 1))
-        }
-        .padding(16)
-        .flowCard(radius: 20)
-    }
+            .onChange(of: store.raceState) { _, newState in
+                sceneController.update(state: newState, cameraMode: store.cameraMode)
+            }
+            .onChange(of: store.cameraMode) { _, newMode in
+                sceneController.update(state: store.raceState, cameraMode: newMode)
+            }
 
-    private func carMarker(label: String, color: Color, isPitting: Bool) -> some View {
-        VStack(spacing: 2) {
-            Text(isPitting ? "PIT" : label)
-                .font(.system(size: 8, weight: .black))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(color, in: Capsule())
-                .shadow(color: color.opacity(0.8), radius: 5)
-            Circle()
-                .fill(.white)
-                .frame(width: 11, height: 11)
-                .overlay(Circle().stroke(color, lineWidth: 3))
-                .shadow(color: color, radius: 6)
+            // Camera mode switcher
+            HStack(spacing: 6) {
+                ForEach(RaceCameraMode.allCases) { mode in
+                    let selected = store.cameraMode == mode
+                    HButton(feedback: .selection) {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            store.setCameraMode(mode)
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: mode.icon)
+                                .font(.system(size: 10, weight: .bold))
+                            Text(mode.rawValue)
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundStyle(selected ? .white : F1.muted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 11)
+                                .fill(selected ? F1.redGradient : LinearGradient(colors: [F1.background.opacity(0.7)], startPoint: .top, endPoint: .bottom))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 11)
+                                .stroke(selected ? F1.red : .white.opacity(0.08), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(PressStyle())
+                }
+            }
         }
-        .offset(y: -9)
+        .padding(12)
+        .flowCard(radius: 22)
     }
 
     // MARK: - Status Banner / Pit Prompt
@@ -212,7 +272,7 @@ struct RaceSimulationView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
         .flowCard(
             radius: 16,
             stroke: state.pitPromptLap != nil ? F1.yellow.opacity(0.6) : F1.red.opacity(0.35)
@@ -251,7 +311,6 @@ struct RaceSimulationView: View {
                         }
                     }
 
-                    // Tyre grip bar
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             Capsule().fill(.white.opacity(0.10))
@@ -299,14 +358,14 @@ struct RaceSimulationView: View {
 
     private var runningOrderCard: some View {
         let userFirst = state.userPosition == 1
-        let ordered: [(pos: Int, driver: Driver, compound: TyreCompound, pits: Int, isLeader: Bool)] = userFirst
+        let ordered: [(pos: Int, driver: Driver, compound: TyreCompound, pits: Int, speed: Int, isLeader: Bool)] = userFirst
             ? [
-                (1, .user, state.userCompound, state.userPitsCompleted, true),
-                (2, .bot, state.botCompound, state.botPitsCompleted, false)
+                (1, .user, state.userCompound, state.userPitsCompleted, state.userSpeedKmh, true),
+                (2, .bot, state.botCompound, state.botPitsCompleted, state.botSpeedKmh, false)
             ]
             : [
-                (1, .bot, state.botCompound, state.botPitsCompleted, true),
-                (2, .user, state.userCompound, state.userPitsCompleted, false)
+                (1, .bot, state.botCompound, state.botPitsCompleted, state.botSpeedKmh, true),
+                (2, .user, state.userCompound, state.userPitsCompleted, state.userSpeedKmh, false)
             ]
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -327,7 +386,7 @@ struct RaceSimulationView: View {
                         Text(entry.driver.isUser ? "YOU" : entry.driver.name.uppercased())
                             .font(.system(size: 13, weight: .bold))
                             .foregroundStyle(.white)
-                        Text("\(entry.pits) pit\(entry.pits == 1 ? "" : "s") completed")
+                        Text("\(entry.pits) pit\(entry.pits == 1 ? "" : "s") · \(entry.speed) km/h")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(F1.muted)
                     }
