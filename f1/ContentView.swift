@@ -61,6 +61,8 @@ struct RootTabView: View {
     @State private var telemetry = TelemetryModel()
     /// Owned here so the standings prediction flow keeps its place when you switch tabs.
     @State private var standingsStore = StandingsPredictionStore()
+    /// Owned here so the TRY-ON simulator keeps its place when you switch tabs.
+    @State private var tryOnStore = TryOnStore()
 
     var body: some View {
         ZStack {
@@ -75,7 +77,7 @@ struct RootTabView: View {
             case .telemetry:
                 TelemetryFlowView(model: telemetry)
             case .tryon:
-                PlaceholderScreen(title: "TRYON")
+                TryOnFlowView(store: tryOnStore)
             case .standings:
                 StandingsView(store: standingsStore)
             }
